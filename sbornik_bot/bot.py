@@ -25,6 +25,7 @@ UTC = timezone.utc
 ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 ID_RE = re.compile(r"\d+")
 MESSAGE_URL_TEMPLATE = "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+VOICE_URL_TEMPLATE = "https://discord.com/channels/{guild_id}/{channel_id}"
 BUCKET_LABELS: dict[Bucket, str] = {
     "main": "основу",
     "extra": "доп. слоты",
@@ -192,6 +193,15 @@ class ManagementDashboardView(discord.ui.View):
         del button
         await self.bot.open_voice_picker(interaction, self.gather_id)
 
+    @discord.ui.button(label="Добавить в войс", style=discord.ButtonStyle.danger, row=1)
+    async def add_to_voice(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["ManagementDashboardView"],
+    ) -> None:
+        del button
+        await self.bot.add_checked_members_to_voice(interaction, self.gather_id)
+
     @discord.ui.button(label="Напомнить в ЛС", style=discord.ButtonStyle.danger, row=1)
     async def remind(
         self,
@@ -252,11 +262,14 @@ class KickMemberSelect(discord.ui.Select["KickMemberView"]):
             return
 
         user_id = int(self.values[0])
+        snapshot = await self.bot.snapshot(self.gather_id)
         removed = await self.bot.storage.remove_participant(self.gather_id, user_id)
         if removed:
             await self.bot.refresh_gather(self.gather_id)
             name = discord.utils.escape_markdown(self._names.get(user_id, str(user_id)))
-            removed_entry = next((entry for entry in snapshot.participants if entry.user_id == user_id), None)
+            removed_entry = None
+            if snapshot is not None:
+                removed_entry = next((entry for entry in snapshot.participants if entry.user_id == user_id), None)
             if removed_entry is not None and interaction.guild is not None and interaction.user is not None:
                 await self.bot.log_member_removed(
                     snapshot.gather,
@@ -380,9 +393,14 @@ class VoiceChannelSelect(discord.ui.ChannelSelect["VoicePickerView"]):
         if not await self.bot.ensure_manager(interaction, gather):
             return
         channel = self.values[0]
-        await self.bot.post_voice_reference(gather, channel)
+        await self.bot.storage.set_voice_channel(self.gather_id, channel.id)
+        updated_gather = await self.bot.storage.get_gather(self.gather_id)
+        if updated_gather is None:
+            await interaction.response.edit_message(content="Сбор уже удалён.", view=None)
+            return
+        await self.bot.post_voice_reference(updated_gather, channel)
         await interaction.response.edit_message(
-            content=f"Ссылка на голосовой канал отправлена: {channel.mention}",
+            content=f"Голосовой канал выбран и сохранён: {channel.mention}",
             view=None,
         )
 
@@ -1262,6 +1280,127 @@ class SbornikBot(commands.Bot):
             )
         except discord.HTTPException:
             logger.warning("Не удалось отправить ссылку на voice для сбора %s", gather.gather_id)
+
+    async def resolve_selected_voice_channel(
+        self,
+        gather: GatherRecord,
+    ) -> discord.VoiceChannel | discord.StageChannel | None:
+        if gather.voice_channel_id is None:
+            return None
+        channel = self.get_channel(gather.voice_channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(gather.voice_channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+        if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            return channel
+        return None
+
+    def build_voice_link(self, guild_id: int, channel_id: int) -> str:
+        return VOICE_URL_TEMPLATE.format(guild_id=guild_id, channel_id=channel_id)
+
+    async def send_voice_link_dm(
+        self,
+        user_id: int,
+        gather: GatherRecord,
+        channel: discord.VoiceChannel | discord.StageChannel,
+    ) -> bool:
+        voice_link = self.build_voice_link(gather.guild_id, channel.id)
+        event_ts = int(gather.event_at.astimezone(UTC).timestamp())
+        dm_text = (
+            f"🔊 Сбор **{gather.title}**\n"
+            f"Дата: <t:{event_ts}:F>\n"
+            f"Войс: {channel.name}\n"
+            f"Ссылка: {voice_link}"
+        )
+        try:
+            user = self.get_user(user_id) or await self.fetch_user(user_id)
+            await user.send(dm_text, allowed_mentions=discord.AllowedMentions.none())
+            return True
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            return False
+
+    async def fetch_member_for_voice_action(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+    ) -> discord.Member | None:
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def add_checked_members_to_voice(
+        self,
+        interaction: discord.Interaction,
+        gather_id: int,
+    ) -> None:
+        snapshot = await self.snapshot(gather_id)
+        if snapshot is None:
+            await self._safe_respond(interaction, "Сбор не найден.")
+            return
+        if not await self.ensure_manager(interaction, snapshot.gather):
+            return
+        if interaction.guild is None:
+            await self._safe_respond(interaction, "Эта кнопка работает только на сервере.")
+            return
+        if not snapshot.participants:
+            await self._safe_respond(interaction, "В этом сборе пока нет участников.")
+            return
+
+        channel = await self.resolve_selected_voice_channel(snapshot.gather)
+        if channel is None:
+            await self._safe_respond(
+                interaction,
+                "Сначала выберите голосовой канал через кнопку **Выбрать войс**.",
+            )
+            return
+
+        moved = 0
+        dm_sent = 0
+        dm_failed = 0
+        fallback_dm = 0
+
+        reason_actor = interaction.user.id if interaction.user is not None else "unknown"
+        move_reason = f"Сбор {snapshot.gather.title}: перенос участников в voice модератором {reason_actor}"
+
+        for entry in snapshot.participants:
+            if entry.checked_in:
+                member = await self.fetch_member_for_voice_action(interaction.guild, entry.user_id)
+                if member is not None:
+                    try:
+                        await member.move_to(channel, reason=move_reason)
+                        moved += 1
+                        continue
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+
+                if await self.send_voice_link_dm(entry.user_id, snapshot.gather, channel):
+                    dm_sent += 1
+                    fallback_dm += 1
+                else:
+                    dm_failed += 1
+                continue
+
+            if await self.send_voice_link_dm(entry.user_id, snapshot.gather, channel):
+                dm_sent += 1
+            else:
+                dm_failed += 1
+
+        await self._safe_respond(
+            interaction,
+            (
+                f"Готово. Войс: {channel.mention}\n"
+                f"Перемещено автоматически: **{moved}**\n"
+                f"Отправлено ссылок в ЛС: **{dm_sent}**\n"
+                f"Из них вместо перемещения: **{fallback_dm}**\n"
+                f"Не удалось отправить в ЛС: **{dm_failed}**"
+            ),
+        )
 
     async def send_reminders(self, interaction: discord.Interaction, gather_id: int) -> None:
         snapshot = await self.snapshot(gather_id)
