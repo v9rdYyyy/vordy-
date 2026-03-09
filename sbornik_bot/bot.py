@@ -37,7 +37,9 @@ BUCKET_FROM_LABELS: dict[Bucket, str] = {
 }
 
 ALLOWED_CREATE_COMMAND_USER_IDS: set[int] = {
-    504936984326832128,
+    # Впишите сюда ID пользователей, которым тоже разрешена команда /сбор.
+    # Пример:
+    # 123456789012345678,
 }
 
 
@@ -526,6 +528,32 @@ class GatherCog(commands.Cog):
             "Логи сборов отключены." if removed else "Логи сборов уже были отключены.",
             ephemeral=True,
         )
+
+    @enable_logs.error
+    async def enable_logs_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        logger.exception("Ошибка в /логи", exc_info=error)
+        message = "Не удалось включить логи. Проверьте права бота и логи консоли."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    @disable_logs.error
+    async def disable_logs_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        logger.exception("Ошибка в /стоплоги", exc_info=error)
+        message = "Не удалось отключить логи. Проверьте логи консоли."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
 
     @app_commands.command(name="сбор", description="Создать новый сбор")
     @app_commands.guild_only()
@@ -1332,9 +1360,15 @@ class SbornikBot(commands.Bot):
         view: discord.ui.View | None = None,
     ) -> None:
         if interaction.response.is_done():
-            await interaction.followup.send(content, view=view, ephemeral=True)
+            if view is None:
+                await interaction.followup.send(content, ephemeral=True)
+            else:
+                await interaction.followup.send(content, view=view, ephemeral=True)
         else:
-            await interaction.response.send_message(content, view=view, ephemeral=True)
+            if view is None:
+                await interaction.response.send_message(content, ephemeral=True)
+            else:
+                await interaction.response.send_message(content, view=view, ephemeral=True)
 
     def _counts_excluding(
         self,
