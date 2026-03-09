@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ UTC = timezone.utc
 ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 ID_RE = re.compile(r"\d+")
 MESSAGE_URL_TEMPLATE = "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+EPHEMERAL_DELETE_DELAY_SECONDS = 1.5
 BUCKET_LABELS: dict[Bucket, str] = {
     "main": "основу",
     "extra": "доп. слоты",
@@ -972,20 +974,36 @@ class SbornikBot(commands.Bot):
 
     async def ensure_manager(self, interaction: discord.Interaction, gather: GatherRecord) -> bool:
         if interaction.guild is None or interaction.user is None:
-            await self._safe_respond(interaction, "Эта кнопка работает только на сервере.")
+            await self._safe_respond(
+                interaction,
+                "Эта кнопка работает только на сервере.",
+                auto_delete=False,
+            )
             return False
         if await self.user_can_manage(gather, interaction.user):
             return True
-        await self._safe_respond(interaction, "У вас недостаточно прав.")
+        await self._safe_respond(
+            interaction,
+            "У вас недостаточно прав.",
+            auto_delete=False,
+        )
         return False
 
     async def ensure_creator(self, interaction: discord.Interaction, gather: GatherRecord) -> bool:
         if interaction.user is None:
-            await self._safe_respond(interaction, "Эта кнопка работает только на сервере.")
+            await self._safe_respond(
+                interaction,
+                "Эта кнопка работает только на сервере.",
+                auto_delete=False,
+            )
             return False
         if interaction.user.id == gather.creator_id:
             return True
-        await self._safe_respond(interaction, "Эта кнопка доступна только создателю сбора.")
+        await self._safe_respond(
+            interaction,
+            "Эта кнопка доступна только создателю сбора.",
+            auto_delete=False,
+        )
         return False
 
     async def user_can_manage(self, gather: GatherRecord, user: discord.abc.User) -> bool:
@@ -1122,6 +1140,7 @@ class SbornikBot(commands.Bot):
             interaction,
             "Выберите действие для управления сбором:",
             view=view,
+            auto_delete=False,
         )
 
     async def open_kick_menu(self, interaction: discord.Interaction, gather_id: int) -> None:
@@ -1135,7 +1154,12 @@ class SbornikBot(commands.Bot):
             await self._safe_respond(interaction, "В этом сборе пока нет участников.")
             return
         view = KickMemberView(self, gather_id, snapshot.participants)
-        await self._safe_respond(interaction, "Кого выгнать из сбора?", view=view)
+        await self._safe_respond(
+            interaction,
+            "Кого выгнать из сбора?",
+            view=view,
+            auto_delete=False,
+        )
 
     async def open_move_menu(self, interaction: discord.Interaction, gather_id: int) -> None:
         snapshot = await self.snapshot(gather_id)
@@ -1148,7 +1172,12 @@ class SbornikBot(commands.Bot):
             await self._safe_respond(interaction, "В этом сборе пока нет участников.")
             return
         view = MoveMemberView(self, gather_id, snapshot.participants)
-        await self._safe_respond(interaction, "Кого переместить?", view=view)
+        await self._safe_respond(
+            interaction,
+            "Кого переместить?",
+            view=view,
+            auto_delete=False,
+        )
 
     async def move_participant(
         self,
@@ -1203,6 +1232,7 @@ class SbornikBot(commands.Bot):
         await self._safe_respond(
             interaction,
             f"**{discord.utils.escape_markdown(display_name)}** перемещён в {BUCKET_LABELS[bucket]}.",
+            auto_delete=False,
         )
 
     async def close_gather_from_panel(
@@ -1229,6 +1259,7 @@ class SbornikBot(commands.Bot):
         await self._safe_respond(
             interaction,
             "Сбор закрыт с тэгом участников." if tag_users else "Сбор закрыт без тэгов.",
+            auto_delete=False,
         )
 
     async def post_closure_message(self, snapshot: GatherSnapshot, *, tag_users: bool) -> None:
@@ -1290,6 +1321,7 @@ class SbornikBot(commands.Bot):
             interaction,
             "Выберите существующий голосовой канал для сбора.",
             view=view,
+            auto_delete=False,
         )
 
     async def post_voice_reference(self, gather: GatherRecord, channel: discord.abc.GuildChannel) -> None:
@@ -1341,6 +1373,7 @@ class SbornikBot(commands.Bot):
         await self._safe_respond(
             interaction,
             f"Напоминание отправлено: **{sent}**. Не удалось доставить: **{failed}**.",
+            auto_delete=False,
         )
 
     async def open_add_moderator(self, interaction: discord.Interaction, gather_id: int) -> None:
@@ -1351,7 +1384,12 @@ class SbornikBot(commands.Bot):
         if not await self.ensure_creator(interaction, gather):
             return
         view = AddModeratorView(self, gather_id)
-        await self._safe_respond(interaction, "Выберите нового модератора сбора.", view=view)
+        await self._safe_respond(
+            interaction,
+            "Выберите нового модератора сбора.",
+            view=view,
+            auto_delete=False,
+        )
 
     async def open_remove_moderator(self, interaction: discord.Interaction, gather_id: int) -> None:
         gather = await self.storage.get_gather(gather_id)
@@ -1374,7 +1412,12 @@ class SbornikBot(commands.Bot):
                 discord.SelectOption(label=_truncate(label, 100), value=str(record.user_id))
             )
         view = RemoveModeratorView(self, gather_id, options)
-        await self._safe_respond(interaction, "Выберите модератора для удаления.", view=view)
+        await self._safe_respond(
+            interaction,
+            "Выберите модератора для удаления.",
+            view=view,
+            auto_delete=False,
+        )
 
     async def add_user_to_thread(self, gather: GatherRecord, member: discord.Member) -> None:
         thread = await self.fetch_thread(gather.thread_id)
@@ -1391,17 +1434,54 @@ class SbornikBot(commands.Bot):
         content: str,
         *,
         view: discord.ui.View | None = None,
+        auto_delete: bool = True,
     ) -> None:
         if interaction.response.is_done():
             if view is None:
-                await interaction.followup.send(content, ephemeral=True)
+                message = await interaction.followup.send(
+                    content,
+                    ephemeral=True,
+                    wait=auto_delete,
+                )
             else:
-                await interaction.followup.send(content, view=view, ephemeral=True)
+                message = await interaction.followup.send(
+                    content,
+                    view=view,
+                    ephemeral=True,
+                    wait=auto_delete,
+                )
+            if auto_delete and message is not None:
+                asyncio.create_task(self._delete_followup_message_later(message))
+            return
+
+        if view is None:
+            await interaction.response.send_message(content, ephemeral=True)
         else:
-            if view is None:
-                await interaction.response.send_message(content, ephemeral=True)
-            else:
-                await interaction.response.send_message(content, view=view, ephemeral=True)
+            await interaction.response.send_message(content, view=view, ephemeral=True)
+        if auto_delete:
+            asyncio.create_task(self._delete_original_response_later(interaction))
+
+    async def _delete_original_response_later(
+        self,
+        interaction: discord.Interaction,
+        delay: float = EPHEMERAL_DELETE_DELAY_SECONDS,
+    ) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await interaction.delete_original_response()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _delete_followup_message_later(
+        self,
+        message: discord.WebhookMessage,
+        delay: float = EPHEMERAL_DELETE_DELAY_SECONDS,
+    ) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
     def _counts_excluding(
         self,
