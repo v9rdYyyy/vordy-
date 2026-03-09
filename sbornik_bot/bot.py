@@ -37,9 +37,7 @@ BUCKET_FROM_LABELS: dict[Bucket, str] = {
 }
 
 ALLOWED_CREATE_COMMAND_USER_IDS: set[int] = {
-    # Впишите сюда ID пользователей, которым тоже разрешена команда /сбор.
-    # Пример:
-    # 123456789012345678,
+    504936984326832128,
 }
 
 
