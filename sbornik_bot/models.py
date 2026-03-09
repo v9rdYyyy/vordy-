@@ -21,6 +21,7 @@ class GatherRecord:
     event_at: datetime
     main_slots: int
     extra_slots: int
+    voice_channel_id: int | None = None
     role_ids: list[int] = field(default_factory=list)
     image_url: str | None = None
     create_thread: bool = False
