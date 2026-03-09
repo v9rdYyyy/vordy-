@@ -670,15 +670,19 @@ class SbornikBot(commands.Bot):
 
         if self.settings.guild_id:
             guild = discord.Object(id=self.settings.guild_id)
+            self.tree.clear_commands(guild=guild)
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
             logger.info(
-                "Команды синхронизированы с тестовым сервером %s: %s шт.",
+                "Команды принудительно пересинхронизированы с сервером %s: %s шт.",
                 self.settings.guild_id,
                 len(synced),
             )
         else:
             synced = await self.tree.sync()
+            logger.warning(
+                "DISCORD_GUILD_ID не указан. Новые slash-команды могут появляться с задержкой, потому что синхронизируются глобально."
+            )
             logger.info("Глобальные команды синхронизированы: %s шт.", len(synced))
 
     async def restore_persistent_views(self) -> None:
