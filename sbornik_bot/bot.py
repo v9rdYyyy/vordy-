@@ -699,17 +699,11 @@ class SbornikBot(commands.Bot):
             self.tree.clear_commands(guild=guild)
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
-            logger.info(
-                "Команды принудительно пересинхронизированы с сервером %s: %s шт.",
-                self.settings.guild_id,
-                len(synced),
-            )
+            logger.info("Guild sync: %s", ", ".join(cmd.name for cmd in synced))
         else:
             synced = await self.tree.sync()
-            logger.warning(
-                "DISCORD_GUILD_ID не указан. Новые slash-команды могут появляться с задержкой, потому что синхронизируются глобально."
-            )
-            logger.info("Глобальные команды синхронизированы: %s шт.", len(synced))
+            logger.warning("DISCORD_GUILD_ID не указан. Команды синхронизируются глобально.")
+            logger.info("Global sync: %s", ", ".join(cmd.name for cmd in synced))
 
     async def restore_persistent_views(self) -> None:
         gathers = await self.storage.list_open_gathers()
