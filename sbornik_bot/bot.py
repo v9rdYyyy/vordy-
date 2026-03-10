@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ UTC = timezone.utc
 ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 ID_RE = re.compile(r"\d+")
 MESSAGE_URL_TEMPLATE = "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+EPHEMERAL_DELETE_DELAY_SECONDS = 3.0
 BUCKET_LABELS: dict[Bucket, str] = {
     "main": "основу",
     "extra": "доп. слоты",
@@ -35,12 +37,14 @@ BUCKET_FROM_LABELS: dict[Bucket, str] = {
     "extra": "доп. слотов",
     "reserve": "резерва",
 }
+MOVE_MEMBER_PAGE_SIZE = 25
 
 ALLOWED_CREATE_COMMAND_USER_IDS: set[int] = {
-    504936984326832128
+   504936984326832128,
 }
 
 SYNC_GUILD_ID: int | None = 1444268473256513569
+
 
 
 @dataclass(slots=True)
@@ -88,6 +92,7 @@ class GatherView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["GatherView"],
     ) -> None:
+        del button
         await self.bot.join_gather(interaction, self.gather_id, preferred="main")
 
     @discord.ui.button(
@@ -101,6 +106,7 @@ class GatherView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["GatherView"],
     ) -> None:
+        del button
         await self.bot.join_gather(interaction, self.gather_id, preferred="extra")
 
     @discord.ui.button(
@@ -114,6 +120,7 @@ class GatherView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["GatherView"],
     ) -> None:
+        del button
         await self.bot.leave_gather(interaction, self.gather_id)
 
     @discord.ui.button(
@@ -127,6 +134,7 @@ class GatherView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["GatherView"],
     ) -> None:
+        del button
         await self.bot.toggle_check_in(interaction, self.gather_id)
 
     @discord.ui.button(
@@ -140,6 +148,7 @@ class GatherView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["GatherView"],
     ) -> None:
+        del button
         await self.bot.open_management(interaction, self.gather_id)
 
 
@@ -245,20 +254,20 @@ class KickMemberSelect(discord.ui.Select["KickMemberView"]):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        gather = await self.bot.storage.get_gather(self.gather_id)
-        if gather is None:
+        snapshot = await self.bot.snapshot(self.gather_id)
+        if snapshot is None:
             await interaction.response.edit_message(content="Сбор уже удалён.", view=None)
             return
 
-        if not await self.bot.ensure_manager(interaction, gather):
+        if not await self.bot.ensure_manager(interaction, snapshot.gather):
             return
 
         user_id = int(self.values[0])
+        removed_entry = next((entry for entry in snapshot.participants if entry.user_id == user_id), None)
         removed = await self.bot.storage.remove_participant(self.gather_id, user_id)
         if removed:
             await self.bot.refresh_gather(self.gather_id)
             name = discord.utils.escape_markdown(self._names.get(user_id, str(user_id)))
-            removed_entry = next((entry for entry in snapshot.participants if entry.user_id == user_id), None)
             if removed_entry is not None and interaction.guild is not None and interaction.user is not None:
                 await self.bot.log_member_removed(
                     snapshot.gather,
@@ -281,9 +290,6 @@ class KickMemberView(discord.ui.View):
     def __init__(self, bot: "SbornikBot", gather_id: int, entries: list[ParticipantRecord]) -> None:
         super().__init__(timeout=180)
         self.add_item(KickMemberSelect(bot, gather_id, entries))
-
-
-MOVE_MEMBER_PAGE_SIZE = 25
 
 
 class MoveMemberSelect(discord.ui.Select["MoveMemberView"]):
@@ -635,7 +641,6 @@ class GatherCog(commands.Cog):
         доп_слоты: app_commands.Range[int, 0, 99] = 0,
         роли: str | None = None,
         комментарий: str | None = None,
-        создать_ветку: bool = False,
         изображение: discord.Attachment | None = None,
     ) -> None:
         if interaction.guild is None or interaction.channel is None:
@@ -690,7 +695,7 @@ class GatherCog(commands.Cog):
             extra_slots=int(доп_слоты),
             role_ids=role_ids,
             image_url=image_url,
-            create_thread=создать_ветку,
+            create_thread=True,
         )
 
         gather = await self.bot.storage.get_gather(gather_id)
@@ -707,21 +712,20 @@ class GatherCog(commands.Cog):
 
         thread_id: int | None = None
         thread_note = ""
-        if создать_ветку:
+        try:
+            thread = await message.create_thread(name=_truncate(f"{название}", 100))
+            thread_id = thread.id
             try:
-                thread = await message.create_thread(name=_truncate(f"{название}", 100))
-                thread_id = thread.id
-                try:
-                    await thread.send(
-                        f"Ветка для сбора **{discord.utils.escape_markdown(название)}** создана."
-                    )
-                except discord.HTTPException:
-                    pass
-                thread_note = f"\nВетка создана: <#{thread.id}>"
-            except discord.HTTPException:
-                thread_note = (
-                    "\nНе удалось создать ветку. Проверь права `Create Public Threads` и `Send Messages in Threads`."
+                await thread.send(
+                    f"Ветка для сбора **{discord.utils.escape_markdown(название)}** создана."
                 )
+            except discord.HTTPException:
+                pass
+            thread_note = f"\nВетка создана: <#{thread.id}>"
+        except discord.HTTPException:
+            thread_note = (
+                "\nНе удалось создать ветку. Проверь права `Create Public Threads` и `Send Messages in Threads`."
+            )
 
         await self.bot.storage.set_message_targets(gather_id, message.id, thread_id)
         await self.bot.refresh_gather(gather_id)
@@ -935,13 +939,45 @@ class SbornikBot(commands.Bot):
             prefix = f"🔄 <@{actor.id}> переместил <@{user_id}>"
         elif actor is not None and actor.id == user_id:
             prefix = f"🔄 <@{user_id}> перешёл"
+        action = f"{prefix} из {BUCKET_FROM_LABELS[source_bucket]} в {BUCKET_LABELS[target_bucket]}"
         await self.send_gather_log(
             gather.guild_id,
-            self._format_gather_log(
-                gather,
-                f"{prefix} из {BUCKET_FROM_LABELS[source_bucket]} в {BUCKET_LABELS[target_bucket]}",
-            ),
+            self._format_gather_log(gather, action),
         )
+        if actor is not None and actor.id != user_id:
+            await self.send_thread_move_log(
+                gather,
+                actor_id=actor.id,
+                user_id=user_id,
+                source_bucket=source_bucket,
+                target_bucket=target_bucket,
+            )
+
+    async def send_thread_move_log(
+        self,
+        gather: GatherRecord,
+        *,
+        actor_id: int,
+        user_id: int,
+        source_bucket: Bucket,
+        target_bucket: Bucket,
+    ) -> None:
+        thread = await self.fetch_thread(gather.thread_id)
+        if thread is None:
+            return
+        try:
+            await thread.send(
+                (
+                    f"🔄 <@{actor_id}> переместил <@{user_id}> "
+                    f"из {BUCKET_FROM_LABELS[source_bucket]} в {BUCKET_LABELS[target_bucket]}"
+                ),
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        except discord.HTTPException:
+            logger.warning(
+                "Не удалось отправить лог перемещения в ветку для сбора %s",
+                gather.gather_id,
+            )
 
     def _format_gather_log(self, gather: GatherRecord, action: str) -> str:
         message_url = MESSAGE_URL_TEMPLATE.format(
@@ -1010,20 +1046,36 @@ class SbornikBot(commands.Bot):
 
     async def ensure_manager(self, interaction: discord.Interaction, gather: GatherRecord) -> bool:
         if interaction.guild is None or interaction.user is None:
-            await self._safe_respond(interaction, "Эта кнопка работает только на сервере.")
+            await self._safe_respond(
+                interaction,
+                "Эта кнопка работает только на сервере.",
+                auto_delete=False,
+            )
             return False
         if await self.user_can_manage(gather, interaction.user):
             return True
-        await self._safe_respond(interaction, "У вас недостаточно прав.")
+        await self._safe_respond(
+            interaction,
+            "У вас недостаточно прав.",
+            auto_delete=False,
+        )
         return False
 
     async def ensure_creator(self, interaction: discord.Interaction, gather: GatherRecord) -> bool:
         if interaction.user is None:
-            await self._safe_respond(interaction, "Эта кнопка работает только на сервере.")
+            await self._safe_respond(
+                interaction,
+                "Эта кнопка работает только на сервере.",
+                auto_delete=False,
+            )
             return False
         if interaction.user.id == gather.creator_id:
             return True
-        await self._safe_respond(interaction, "Эта кнопка доступна только создателю сбора.")
+        await self._safe_respond(
+            interaction,
+            "Эта кнопка доступна только создателю сбора.",
+            auto_delete=False,
+        )
         return False
 
     async def user_can_manage(self, gather: GatherRecord, user: discord.abc.User) -> bool:
@@ -1160,6 +1212,7 @@ class SbornikBot(commands.Bot):
             interaction,
             "Выберите действие для управления сбором:",
             view=view,
+            auto_delete=False,
         )
 
     async def open_kick_menu(self, interaction: discord.Interaction, gather_id: int) -> None:
@@ -1173,7 +1226,12 @@ class SbornikBot(commands.Bot):
             await self._safe_respond(interaction, "В этом сборе пока нет участников.")
             return
         view = KickMemberView(self, gather_id, snapshot.participants)
-        await self._safe_respond(interaction, "Кого выгнать из сбора?", view=view)
+        await self._safe_respond(
+            interaction,
+            "Кого выгнать из сбора?",
+            view=view,
+            auto_delete=False,
+        )
 
     async def open_move_menu(self, interaction: discord.Interaction, gather_id: int) -> None:
         snapshot = await self.snapshot(gather_id)
@@ -1186,7 +1244,12 @@ class SbornikBot(commands.Bot):
             await self._safe_respond(interaction, "В этом сборе пока нет участников.")
             return
         view = MoveMemberView(self, gather_id, snapshot.participants)
-        await self._safe_respond(interaction, view.menu_title, view=view)
+        await self._safe_respond(
+            interaction,
+            view.menu_title,
+            view=view,
+            auto_delete=False,
+        )
 
     async def move_participant(
         self,
@@ -1241,6 +1304,7 @@ class SbornikBot(commands.Bot):
         await self._safe_respond(
             interaction,
             f"**{discord.utils.escape_markdown(display_name)}** перемещён в {BUCKET_LABELS[bucket]}.",
+            auto_delete=False,
         )
 
     async def close_gather_from_panel(
@@ -1267,6 +1331,7 @@ class SbornikBot(commands.Bot):
         await self._safe_respond(
             interaction,
             "Сбор закрыт с тэгом участников." if tag_users else "Сбор закрыт без тэгов.",
+            auto_delete=False,
         )
 
     async def post_closure_message(self, snapshot: GatherSnapshot, *, tag_users: bool) -> None:
@@ -1328,6 +1393,7 @@ class SbornikBot(commands.Bot):
             interaction,
             "Выберите существующий голосовой канал для сбора.",
             view=view,
+            auto_delete=False,
         )
 
     async def post_voice_reference(self, gather: GatherRecord, channel: discord.abc.GuildChannel) -> None:
@@ -1379,6 +1445,7 @@ class SbornikBot(commands.Bot):
         await self._safe_respond(
             interaction,
             f"Напоминание отправлено: **{sent}**. Не удалось доставить: **{failed}**.",
+            auto_delete=False,
         )
 
     async def open_add_moderator(self, interaction: discord.Interaction, gather_id: int) -> None:
@@ -1389,7 +1456,12 @@ class SbornikBot(commands.Bot):
         if not await self.ensure_creator(interaction, gather):
             return
         view = AddModeratorView(self, gather_id)
-        await self._safe_respond(interaction, "Выберите нового модератора сбора.", view=view)
+        await self._safe_respond(
+            interaction,
+            "Выберите нового модератора сбора.",
+            view=view,
+            auto_delete=False,
+        )
 
     async def open_remove_moderator(self, interaction: discord.Interaction, gather_id: int) -> None:
         gather = await self.storage.get_gather(gather_id)
@@ -1412,7 +1484,12 @@ class SbornikBot(commands.Bot):
                 discord.SelectOption(label=_truncate(label, 100), value=str(record.user_id))
             )
         view = RemoveModeratorView(self, gather_id, options)
-        await self._safe_respond(interaction, "Выберите модератора для удаления.", view=view)
+        await self._safe_respond(
+            interaction,
+            "Выберите модератора для удаления.",
+            view=view,
+            auto_delete=False,
+        )
 
     async def add_user_to_thread(self, gather: GatherRecord, member: discord.Member) -> None:
         thread = await self.fetch_thread(gather.thread_id)
@@ -1429,17 +1506,54 @@ class SbornikBot(commands.Bot):
         content: str,
         *,
         view: discord.ui.View | None = None,
+        auto_delete: bool = True,
     ) -> None:
         if interaction.response.is_done():
             if view is None:
-                await interaction.followup.send(content, ephemeral=True)
+                message = await interaction.followup.send(
+                    content,
+                    ephemeral=True,
+                    wait=auto_delete,
+                )
             else:
-                await interaction.followup.send(content, view=view, ephemeral=True)
+                message = await interaction.followup.send(
+                    content,
+                    view=view,
+                    ephemeral=True,
+                    wait=auto_delete,
+                )
+            if auto_delete and message is not None:
+                asyncio.create_task(self._delete_followup_message_later(message))
+            return
+
+        if view is None:
+            await interaction.response.send_message(content, ephemeral=True)
         else:
-            if view is None:
-                await interaction.response.send_message(content, ephemeral=True)
-            else:
-                await interaction.response.send_message(content, view=view, ephemeral=True)
+            await interaction.response.send_message(content, view=view, ephemeral=True)
+        if auto_delete:
+            asyncio.create_task(self._delete_original_response_later(interaction))
+
+    async def _delete_original_response_later(
+        self,
+        interaction: discord.Interaction,
+        delay: float = EPHEMERAL_DELETE_DELAY_SECONDS,
+    ) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await interaction.delete_original_response()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _delete_followup_message_later(
+        self,
+        message: discord.WebhookMessage,
+        delay: float = EPHEMERAL_DELETE_DELAY_SECONDS,
+    ) -> None:
+        await asyncio.sleep(delay)
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
     def _counts_excluding(
         self,
