@@ -41,10 +41,6 @@ ALLOWED_CREATE_COMMAND_USER_IDS: set[int] = {
 }
 
 SYNC_GUILD_ID: int | None = 1444268473256513569
-# Впишите сюда ID сервера, где команды должны синхронизироваться сразу.
-# Пример:
-# SYNC_GUILD_ID = 123456789012345678
-# Если оставить None, бот попробует взять guild_id из Settings / .env.
 
 
 @dataclass(slots=True)
