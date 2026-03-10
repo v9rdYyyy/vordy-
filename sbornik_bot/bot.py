@@ -26,7 +26,7 @@ UTC = timezone.utc
 ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 ID_RE = re.compile(r"\d+")
 MESSAGE_URL_TEMPLATE = "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-EPHEMERAL_DELETE_DELAY_SECONDS = 3.0
+EPHEMERAL_DELETE_DELAY_SECONDS = 1.0
 BUCKET_LABELS: dict[Bucket, str] = {
     "main": "основу",
     "extra": "доп. слоты",
